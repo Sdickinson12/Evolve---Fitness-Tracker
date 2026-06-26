@@ -134,12 +134,16 @@ async function seedDemoDataOnce(): Promise<void> {
   const startMonday = new Date(thisMonday);
   startMonday.setDate(thisMonday.getDate() - 11 * 7);
 
+  const todayKey = toDateKey(today);
   let dayCounter = 0;
   for (let week = 0; week < 12; week++) {
     for (const offset of [0, 2, 4]) {
       const date = new Date(startMonday);
       date.setDate(startMonday.getDate() + week * 7 + offset);
-      if (date > today) continue;
+      // Stop strictly before today — a demo workout dated today would
+      // pre-load into Log Workout's default date, making the page look like
+      // there's already an unsaved session sitting there on first open.
+      if (date > today || toDateKey(date) === todayKey) continue;
 
       const dayType = DAY_TYPES[dayCounter % 3];
       dayCounter++;
