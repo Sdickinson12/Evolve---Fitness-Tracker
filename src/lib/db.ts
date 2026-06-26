@@ -1,5 +1,5 @@
 import { openDB, type IDBPDatabase } from 'idb';
-import type { ActiveSession, Exercise, UserSettings, Workout, WorkoutTemplate } from '../types';
+import type { ActiveSession, Exercise, UserSettings, Workout, WorkoutExercise, WorkoutTemplate } from '../types';
 import { BUILT_IN_EXERCISES } from './exercises';
 import { toDateKey } from './calculations';
 
@@ -63,6 +63,121 @@ export async function initDb() {
     }
   }
   await tx.done;
+  await seedDemoDataOnce();
+}
+
+// Demo seed lives in app code (not a one-off browser script) so it ships for
+// every visitor's own browser storage, not just whichever machine ran it once
+// — IndexedDB never leaves the browser it's written in. Runs exactly once per
+// browser (gated on a localStorage flag, not on "workouts is empty") so it
+// never comes back after a deliberate Clear Data.
+const DEMO_SEED_FLAG = 'evolve_demo_seeded';
+
+async function seedDemoDataOnce(): Promise<void> {
+  if (typeof localStorage === 'undefined' || localStorage.getItem(DEMO_SEED_FLAG)) return;
+  localStorage.setItem(DEMO_SEED_FLAG, '1');
+
+  const existing = await getAllWorkouts();
+  if (existing.length > 0) return; // a real user's data already exists — never overwrite it
+
+  type DemoExercise = [exerciseId: string, name: string, muscleGroup: Exercise['muscleGroup'], reps: number, baseKg: number, isCompound: boolean];
+  const PUSH: DemoExercise[] = [
+    ['bb-bench-press', 'Barbell Bench Press', 'chest', 5, 60, true],
+    ['ohp', 'Overhead Press', 'shoulders', 6, 35, true],
+    ['dips', 'Dips', 'triceps', 10, 0, false],
+    ['lateral-raise', 'Lateral Raise', 'shoulders', 12, 10, false],
+    ['tricep-pushdown', 'Tricep Pushdown', 'triceps', 10, 25, false],
+  ];
+  const PULL: DemoExercise[] = [
+    ['deadlift', 'Deadlift', 'back', 5, 100, true],
+    ['bb-row', 'Barbell Row', 'back', 8, 55, true],
+    ['lat-pulldown', 'Lat Pulldown', 'back', 10, 50, false],
+    ['bb-curl', 'Barbell Curl', 'biceps', 10, 25, false],
+    ['face-pull', 'Face Pull', 'back', 12, 20, false],
+  ];
+  const LEGS: DemoExercise[] = [
+    ['back-squat', 'Back Squat', 'quads', 5, 70, true],
+    ['romanian-deadlift', 'Romanian Deadlift', 'hamstrings', 8, 60, true],
+    ['leg-press', 'Leg Press', 'quads', 10, 90, false],
+    ['leg-curl', 'Leg Curl', 'hamstrings', 10, 30, false],
+    ['calf-raise', 'Standing Calf Raise', 'calves', 15, 40, false],
+  ];
+  const DAY_TYPES = [
+    { name: 'Push Day', exercises: PUSH, durationSec: 3000 },
+    { name: 'Pull Day', exercises: PULL, durationSec: 3300 },
+    { name: 'Leg Day', exercises: LEGS, durationSec: 3600 },
+  ];
+
+  // Top-set weight as a fraction of base, by week (12 weeks), with a deload
+  // around week 6 — so the Stats 1RM chart shows a real progression curve
+  // instead of a flat or naively-monotonic line.
+  const compoundPct = [1, 1.02, 1.04, 1.06, 1.08, 1.10, 0.95, 1.0, 1.05, 1.08, 1.11, 1.14];
+  const accessoryPct = [1, 1.0, 1.03, 1.03, 1.06, 1.06, 0.98, 1.0, 1.03, 1.06, 1.08, 1.10];
+
+  function weightForWeek(base: number, week: number, isCompound: boolean): number {
+    if (base === 0) return 0;
+    const pct = (isCompound ? compoundPct : accessoryPct)[week];
+    const rounding = isCompound ? 2.5 : 1;
+    return Math.round((base * pct) / rounding) * rounding;
+  }
+
+  function newId() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  const today = new Date();
+  const dow = today.getDay();
+  const diffToMonday = dow === 0 ? -6 : 1 - dow;
+  const thisMonday = new Date(today);
+  thisMonday.setDate(today.getDate() + diffToMonday);
+  thisMonday.setHours(9, 0, 0, 0);
+  const startMonday = new Date(thisMonday);
+  startMonday.setDate(thisMonday.getDate() - 11 * 7);
+
+  let dayCounter = 0;
+  for (let week = 0; week < 12; week++) {
+    for (const offset of [0, 2, 4]) {
+      const date = new Date(startMonday);
+      date.setDate(startMonday.getDate() + week * 7 + offset);
+      if (date > today) continue;
+
+      const dayType = DAY_TYPES[dayCounter % 3];
+      dayCounter++;
+
+      const exercises: WorkoutExercise[] = dayType.exercises.map(([exerciseId, name, muscleGroup, reps, base, isCompound]) => {
+        const weight = weightForWeek(base, week, isCompound);
+        const setCount = isCompound ? 4 : 3;
+        const sets = Array.from({ length: setCount }, () => ({ id: newId(), reps, weight }));
+        return { id: newId(), exerciseId, exerciseName: name, muscleGroup, sets };
+      });
+
+      const startedAt = date.getTime();
+      const endedAt = startedAt + dayType.durationSec * 1000;
+      await saveWorkout({
+        id: newId(),
+        date: toDateKey(date),
+        name: dayType.name,
+        exercises,
+        createdAt: startedAt,
+        startedAt,
+        endedAt,
+        durationSec: dayType.durationSec,
+      });
+    }
+  }
+
+  await saveSettings({ id: 'profile', bodyWeightKg: 82 });
+
+  for (const dt of DAY_TYPES) {
+    await saveTemplate({
+      id: newId(),
+      name: dt.name,
+      createdAt: Date.now(),
+      exercises: dt.exercises.map(([exerciseId, name, muscleGroup]) => ({
+        id: newId(), exerciseId, exerciseName: name, muscleGroup,
+      })),
+    });
+  }
 }
 
 export async function getAllExercises(): Promise<Exercise[]> {
