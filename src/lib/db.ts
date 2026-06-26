@@ -170,6 +170,34 @@ async function seedDemoDataOnce(): Promise<void> {
     }
   }
 
+  // One extra session on the Tuesday of the current week — Tuesday isn't one
+  // of the Mon/Wed/Fri slots above, so this can't collide with it — giving
+  // the most recent week 3 logged sessions instead of 2.
+  const extraTuesday = new Date(thisMonday);
+  extraTuesday.setDate(thisMonday.getDate() + 1);
+  if (extraTuesday <= today && toDateKey(extraTuesday) !== todayKey) {
+    const legDay = DAY_TYPES[2];
+    const week = 11;
+    const exercises: WorkoutExercise[] = legDay.exercises.map(([exerciseId, name, muscleGroup, reps, base, isCompound]) => {
+      const weight = weightForWeek(base, week, isCompound);
+      const setCount = isCompound ? 4 : 3;
+      const sets = Array.from({ length: setCount }, () => ({ id: newId(), reps, weight }));
+      return { id: newId(), exerciseId, exerciseName: name, muscleGroup, sets };
+    });
+    const startedAt = extraTuesday.getTime();
+    const endedAt = startedAt + legDay.durationSec * 1000;
+    await saveWorkout({
+      id: newId(),
+      date: toDateKey(extraTuesday),
+      name: legDay.name,
+      exercises,
+      createdAt: startedAt,
+      startedAt,
+      endedAt,
+      durationSec: legDay.durationSec,
+    });
+  }
+
   await saveSettings({ id: 'profile', bodyWeightKg: 82 });
 
   for (const dt of DAY_TYPES) {
